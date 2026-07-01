@@ -1,4 +1,4 @@
-yamlname: Daily Karnataka STP Scraper
+name: Daily Karnataka STP Scraper
 
 on:
   schedule:
