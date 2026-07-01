@@ -1,73 +1,95 @@
 import os
-import json
+import asyncio
 import pandas as pd
-from datetime import datetime
-from typing import Optional, List
+from crawl4ai import AsyncWebCrawler
+from crawl4ai.async_configs import CrawlerRunConfig, CacheMode
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-from crawl4ai import WebCrawler
-from crawl4ai.chunking_strategy import RegexChunking
-from crawl4ai.extraction_strategy import LLMExtractionStrategy
-from serpapi import GoogleSearch
 
-# Read the secure keys we saved in GitHub
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY")
+# Define structured extraction schema for your lead data
+class LeadExtractionSchema(BaseModel):
+    company_name: str = Field(description="Name of the STP or environmental infrastructure firm.")
+    contact_person: str = Field(default="N/A", description="Name of the key contact, engineer, or manager.")
+    phone_number: str = Field(default="N/A", description="Contact phone numbers or mobile numbers.")
+    email_address: str = Field(default="N/A", description="Professional email addresses found.")
+    location: str = Field(default="Karnataka", description="City, district, or specific location in Karnataka.")
 
-class STPLeadSchema(BaseModel):
-    company_or_project_name: Optional[str] = Field(None, description="Name of company/project in Karnataka.")
-    project_address: Optional[str] = Field(None, description="Physical address in Karnataka.")
-    office_address: Optional[str] = Field(None, description="Headquarters/Office address.")
-    phone_number: Optional[str] = Field(None, description="Contact phone or mobile numbers.")
-    stp_capacity: Optional[str] = Field(None, description="STP capacity metric (e.g., 50 KLD, 2 MLD).")
-
-def discover_stp_urls(query: str) -> List[str]:
-    search = GoogleSearch({"q": query, "api_key": SERPAPI_API_KEY, "num": 5})
-    results = search.get_dict()
-    return [r.get("link") for r in results.get("organic_results", []) if r.get("link")]
-
-async def extract_stp_data(urls: List[str]):
-    strategy = LLMExtractionStrategy(
-        provider="openai/gpt-4o-mini",
-        api_token=OPENAI_API_KEY,
-        schema=STPLeadSchema.schema(),
-        extraction_type="schema",
-        instruction="Extract Karnataka Sewage Treatment Plant (STP) leads with addresses, phone numbers, and capacities.",
+async def extract_stp_leads_from_url(url: str):
+    print(f"[Agent] Target URL exploration initiated: {url}")
+    
+    # Configure the modern AsyncWebCrawler engine settings
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS, # Force fresh data retrieval instead of cache
+        word_count_threshold=10
     )
-    all_leads = []
-    async with WebCrawler() as crawler:
-        for url in urls:
-            result = await crawler.arun(url=url, extraction_strategy=strategy, chunk_strategy=RegexChunking(), bypass_cache=True)
-            if result.success and result.extracted_content:
-                try:
-                    data = json.loads(result.extracted_content)
-                    if isinstance(data, list): all_leads.extend(data)
-                    else: all_leads.append(data)
-                except: continue
-    return all_leads
+    
+    # Asynchronously spin up the browser instance
+    async with AsyncWebCrawler() as crawler:
+        result = await crawler.arun(url=url, config=run_config)
+        
+        if not result.success:
+            print(f"[Error] Failed to securely scrape target website: {url}")
+            return None
+            
+        raw_markdown_data = result.markdown
+        print(f"[Agent] Successfully retrieved {len(raw_markdown_data)} characters of unstructured data.")
+        
+    # Set up Structured Data Extraction using ChatOpenAI
+    print("[Agent] Passing data to LLM processing engine for structuring...")
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.1,
+        openai_api_key=os.getenv("OPENAI_API_KEY")
+    )
+    
+    # Force the LLM to strictly follow the target schema structure
+    structured_llm = llm.with_structured_output(LeadExtractionSchema)
+    
+    try:
+        # Prevent context overflows by truncating text safely
+        prompt = f"Extract all Sewage Treatment Plant (STP) commercial leads from this webpage:\n\n{raw_markdown_data[:12000]}"
+        extracted_data = structured_llm.invoke(prompt)
+        
+        # Format properties neatly into a flat directory record
+        lead_record = {
+            "Company Name": extracted_data.company_name,
+            "Contact Person": extracted_data.contact_person,
+            "Phone Number": extracted_data.phone_number,
+            "Email": extracted_data.email_address,
+            "Location": extracted_data.location,
+            "Source URL": url
+        }
+        return lead_record
+        
+    except Exception as e:
+        print(f"[Error] LLM extraction interface processing failure: {e}")
+        return None
 
 async def main():
-    # Tailored specifically for Karnataka, looking for recent directory/tender files
-    query = "Sewage Treatment Plant STP contact directory capacity KLD Karnataka Bangalore"
-    target_urls = discover_stp_urls(query)
+    # Example targets: Replace these strings with your dynamic lead sourcing logic or search loops
+    target_urls = [
+        "https://example.com"
+    ]
     
-    if not target_urls:
-        print("No URLs found.")
-        return
-        
-    leads = await extract_stp_data(target_urls)
-    
-    if leads:
-        df = pd.DataFrame(leads)
-        filename = "karnataka_stp_leads.csv"
-        
-        # If the file already exists, merge new data into it seamlessly
-        if os.path.exists(filename):
-            old_df = pd.read_csv(filename)
-            df = pd.concat([old_df, df]).drop_duplicates().reset_index(drop=True)
+    all_leads = []
+    for url in target_urls:
+        lead = await extract_stp_leads_from_url(url)
+        if lead and lead["Company Name"] != "N/A":
+            all_leads.append(lead)
             
-        df.to_csv(filename, index=False)
-        print(f"Successfully saved {len(leads)} leads to {filename}")
+    if all_leads:
+        df = pd.DataFrame(all_leads)
+        output_file = "karnataka_stp_leads.csv"
+        
+        # If file exists from yesterday, append new records; otherwise, create a new file
+        if os.path.exists(output_file):
+            df.to_csv(output_file, mode='a', header=False, index=False)
+        else:
+            df.to_csv(output_file, index=False)
+        print(f"[Success] Data pipeline run finalized. Syncing rows to {output_file}.")
+    else:
+        print("[Agent] No clean commercial leads found during this execution window.")
 
 if __name__ == "__main__":
-    import asyncio
+    # Safely boots up the main asynchronous execution loop
     asyncio.run(main())
