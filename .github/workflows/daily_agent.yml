@@ -1,0 +1,37 @@
+name: Daily Karnataka STP Scraper
+
+on:
+  schedule:
+    # 8:00 AM Indian Standard Time (IST) is 2:30 AM UTC
+    - cron: '30 2 * * *'
+  workflow_dispatch: # Allows you to also run it manually anytime with a single click
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-node: '3.10'
+
+    - name: Install Agent Libraries
+      run: |
+        pip install crawl4ai langchain-openai pydantic pandas google-search-results
+
+    - name: Execute Agent Script
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+      run: python agent.py
+
+    - name: Save Updated CSV Data Back to GitHub
+      run: |
+        git config --global user.name 'STP-Agent-Bot'
+        git config --global user.email 'bot@github.com'
+        git add karnataka_stp_leads.csv || true
+        git commit -m "Automated Daily Data Sync [Skip CI]" || true
+        git push || true
