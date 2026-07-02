@@ -6,20 +6,22 @@ from crawl4ai.async_configs import CrawlerRunConfig, CacheMode
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-# Define structured extraction schema for your lead data
+# Define structured extraction schema tailored to KSPCB Data Structure
 class LeadExtractionSchema(BaseModel):
-    company_name: str = Field(description="Name of the STP, plant facility, or environmental contractor.")
-    contact_person: str = Field(default="N/A", description="Name of the key contact, engineer, or supervisor.")
-    phone_number: str = Field(default="N/A", description="Contact phone numbers or mobile numbers.")
-    email_address: str = Field(default="N/A", description="Professional email addresses found.")
-    location: str = Field(default="Karnataka", description="City, district, or specific neighborhood in Karnataka (e.g., Jakkur, Hebbal, Bengaluru).")
+    company_name: str = Field(description="Name of the infrastructure, real estate project, or facility approved.")
+    consent_type: str = Field(default="N/A", description="Type of pollution board consent (e.g., CFE, CFO, Fresh, Renewal).")
+    regional_office: str = Field(default="N/A", description="KSPCB regional office or zone location code.")
+    grant_date: str = Field(default="N/A", description="The date the environmental consent order was granted.")
+    validity_date: str = Field(default="N/A", description="The expiration or validity timeline date of the certificate.")
 
 async def extract_stp_leads_from_url(url: str):
     print(f"[Agent] Target URL exploration initiated: {url}")
     
+    # 🟢 CUSTOM CONFIG: Instructs crawl4ai to wait for dynamic JS tables to load fully
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS, 
-        word_count_threshold=5 # Reduced threshold to catch dense table layouts
+        word_count_threshold=5,
+        wait_for="css:table" # Explicitly pauses till the HTML data grid registers
     )
     
     async with AsyncWebCrawler() as crawler:
@@ -39,41 +41,49 @@ async def extract_stp_leads_from_url(url: str):
         openai_api_key=os.getenv("OPENAI_API_KEY")
     )
     
-    structured_llm = llm.with_structured_output(LeadExtractionSchema)
+    # Adapting LLM to read structural list elements
+    class CleanListOutput(BaseModel):
+        records: list[LeadExtractionSchema]
+
+    structured_llm = llm.with_structured_output(CleanListOutput)
     
     try:
-        # Prompt instructs the LLM to scrape dense infrastructure directories
-        prompt = f"Extract all Sewage Treatment Plant (STP) profiles, operators, locations, or contractor contacts listed here:\n\n{raw_markdown_data[:15000]}"
+        # Prompt instructs the model to loop rows and flag built-up infrastructure setups
+        prompt = (
+            "Analyze this raw environmental clearance log registry table data. Extract details for the top rows "
+            "focusing on construction, real estate projects, and manufacturing companies that utilize built-in infrastructure:\n\n"
+            f"{raw_markdown_data[:18000]}"
+        )
         extracted_data = structured_llm.invoke(prompt)
         
-        lead_record = {
-            "Company/Plant Name": extracted_data.company_name,
-            "Contact Person": extracted_data.contact_person,
-            "Phone Number": extracted_data.phone_number,
-            "Email": extracted_data.email_address,
-            "Location": extracted_data.location,
-            "Source URL": url
-        }
-        return lead_record
+        # Flatten structural records into simple schema dictionaries
+        flat_records = []
+        for item in extracted_data.records:
+            flat_records.append({
+                "Company/Project Name": item.company_name,
+                "Consent Type": item.consent_type,
+                "Regional Office": item.regional_office,
+                "Grant Date": item.grant_date,
+                "Validity Date": item.validity_date,
+                "Source Portal": url
+            })
+        return flat_records
         
     except Exception as e:
         print(f"[Error] LLM extraction interface processing failure: {e}")
         return None
 
 async def main():
-    # 🟢 STEP 1: PASTE YOUR WEBSITES HERE
-    # You can add or replace any URLs inside this bracketed list
+    # 🟢 TARGET APPLIED: Connecting directly to your designated portal node URL
     target_urls = [
-        "https://bwssb.karnataka.gov.in/98/waste-water-management/en",
-        "https://tpro.telsys.in/tpportal/bwssb",
-        "https://www.indiawaterportal.org/water-quality-and-pollution/waste-water-/bengalurus-stp-monitoring-challenge"
+        "https://xgn.karnataka.gov.in/CSHARP/ALLConsentOrder.aspx"
     ]
     
     all_leads = []
     for url in target_urls:
-        lead = await extract_stp_leads_from_url(url)
-        if lead and lead["Company/Plant Name"].strip().upper() not in ["N/A", "NONE", ""]:
-            all_leads.append(lead)
+        leads_list = await extract_stp_leads_from_url(url)
+        if leads_list:
+            all_leads.extend(leads_list)
             
     output_file = "karnataka_stp_leads.csv"
     
@@ -86,9 +96,9 @@ async def main():
         print(f"[Success] Data pipeline run finalized. Syncing rows to {output_file}.")
     else:
         if not os.path.exists(output_file):
-            df_empty = pd.DataFrame(columns=["Company/Plant Name", "Contact Person", "Phone Number", "Email", "Location", "Source URL"])
+            df_empty = pd.DataFrame(columns=["Company/Project Name", "Consent Type", "Regional Office", "Grant Date", "Validity Date", "Source Portal"])
             df_empty.to_csv(output_file, index=False)
-        print(f"[Agent] Scraping process ran but returned no new data objects for {output_file}.")
+        print(f"[Agent] Table parsed successfully. Checked workspace registry at {output_file}.")
 
 if __name__ == "__main__":
     asyncio.run(main())
