@@ -9,6 +9,11 @@ on:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
+    
+    # 🟢 NEW SECURITY LAYER: Grant authorization to upload files back to the code tree
+    permissions:
+      contents: write
+      
     steps:
     - name: Checkout repository code
       uses: actions/checkout@v4
@@ -21,9 +26,8 @@ jobs:
     - name: Install Agent Libraries
       run: |
         python -m pip install --upgrade pip
-        pip install crawl4ai langchain-openai pydantic pandas google-search-results
+        pip install crawl4ai langchain-openai pydantic pandas google-search-results requests
 
-    # 🟢 NEW STEP ADDED BELOW TO FIX PLAYWRIGHT BROWSER ERROR
     - name: Run Crawl4AI Post-Installation Setup
       run: |
         crawl4ai-setup
@@ -38,6 +42,6 @@ jobs:
       run: |
         git config --global user.name 'STP-Agent-Bot'
         git config --global user.email 'bot@github.com'
-        git add karnataka_stp_leads.csv || true
-        git commit -m "Automated Daily Data Sync [Skip CI]" || true
-        git push || true
+        git add karnataka_stp_leads.csv
+        git commit -m "Automated Daily Data Sync [Skip CI]" || echo "No data updates detected today."
+        git push origin HEAD:main
