@@ -6,99 +6,119 @@ from crawl4ai.async_configs import CrawlerRunConfig, CacheMode
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-# Define structured extraction schema tailored to KSPCB Data Structure
-class LeadExtractionSchema(BaseModel):
-    company_name: str = Field(description="Name of the infrastructure, real estate project, or facility approved.")
-    consent_type: str = Field(default="N/A", description="Type of pollution board consent (e.g., CFE, CFO, Fresh, Renewal).")
-    regional_office: str = Field(default="N/A", description="KSPCB regional office or zone location code.")
-    grant_date: str = Field(default="N/A", description="The date the environmental consent order was granted.")
-    validity_date: str = Field(default="N/A", description="The expiration or validity timeline date of the certificate.")
+# 🟢 STAGE 1 SCHEMA: For extracting document urls from the main dashboard grid
+class ConsentRowSchema(BaseModel):
+    company_name: str = Field(description="Name of the applicant company or project.")
+    consent_number: str = Field(description="The unique Consent Number.")
+    document_url: str = Field(description="The absolute link or URL attached to the consent number text.")
 
-async def extract_stp_leads_from_url(url: str):
-    print(f"[Agent] Target URL exploration initiated: {url}")
+# 🟢 STAGE 2 SCHEMA: Deep data extracted from inside the individual document pages
+class DeepSTPDetailsSchema(BaseModel):
+    client_name: str = Field(description="Official name of the client, developer, or industry operator.")
+    stp_required: str = Field(description="Yes or No indicator if an STP/ETP facility installation is mandated.")
+    stp_capacity: str = Field(default="N/A", description="Capacity of the Sewage Treatment Plant mentioned (e.g., 50 KLD, 1 MLD).")
+    discharge_standards: str = Field(default="N/A", description="Treated water disposal or reuse requirements (e.g., flushing, gardening).")
+    contact_details: str = Field(default="N/A", description="Any phone numbers, emails, or office addresses located inside the document text.")
+
+async def get_consent_rows_from_dashboard(dashboard_url: str):
+    print(f"[Agent Step 1] Extracting rows and link objects from: {dashboard_url}")
     
-    # 🟢 CUSTOM CONFIG: Instructs crawl4ai to wait for dynamic JS tables to load fully
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS, 
-        word_count_threshold=5,
-        wait_for="css:table" # Explicitly pauses till the HTML data grid registers
+        wait_for="css:table",
+        word_count_threshold=2
     )
     
     async with AsyncWebCrawler() as crawler:
-        result = await crawler.arun(url=url, config=run_config)
-        
+        result = await crawler.arun(url=dashboard_url, config=run_config)
         if not result.success:
-            print(f"[Error] Failed to securely scrape target website: {url}")
-            return None
+            return []
             
-        raw_markdown_data = result.markdown
-        print(f"[Agent] Successfully retrieved {len(raw_markdown_data)} characters of unstructured data.")
+        raw_markdown = result.markdown
         
-    print("[Agent] Passing data to LLM processing engine for structuring...")
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.1,
-        openai_api_key=os.getenv("OPENAI_API_KEY")
-    )
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1, openai_api_key=os.getenv("OPENAI_API_KEY"))
     
-    # Adapting LLM to read structural list elements
-    class CleanListOutput(BaseModel):
-        records: list[LeadExtractionSchema]
-
-    structured_llm = llm.with_structured_output(CleanListOutput)
+    class RowList(BaseModel):
+        rows: list[ConsentRowSchema]
+        
+    structured_llm = llm.with_structured_output(RowList)
     
     try:
-        # Prompt instructs the model to loop rows and flag built-up infrastructure setups
         prompt = (
-            "Analyze this raw environmental clearance log registry table data. Extract details for the top rows "
-            "focusing on construction, real estate projects, and manufacturing companies that utilize built-in infrastructure:\n\n"
-            f"{raw_markdown_data[:18000]}"
+            "Analyze this KSPCB XGN environmental portal data table. "
+            "Extract the Company Name, Consent Number, and the exact destination URL/Link attached to that consent number text. "
+            "Ensure the URL is a complete link:\n\n" + raw_markdown[:15000]
         )
-        extracted_data = structured_llm.invoke(prompt)
-        
-        # Flatten structural records into simple schema dictionaries
-        flat_records = []
-        for item in extracted_data.records:
-            flat_records.append({
-                "Company/Project Name": item.company_name,
-                "Consent Type": item.consent_type,
-                "Regional Office": item.regional_office,
-                "Grant Date": item.grant_date,
-                "Validity Date": item.validity_date,
-                "Source Portal": url
-            })
-        return flat_records
-        
+        extracted = structured_llm.invoke(prompt)
+        return extracted.rows
     except Exception as e:
-        print(f"[Error] LLM extraction interface processing failure: {e}")
+        print(f"[Error Stage 1] Link indexing parsing failure: {e}")
+        return []
+
+async def extract_deep_stp_data(document_url: str):
+    print(f"[Agent Step 2] Deep scanning target order document: {document_url}")
+    
+    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, word_count_threshold=5)
+    
+    async with AsyncWebCrawler() as crawler:
+        result = await crawler.arun(url=document_url, config=run_config)
+        if not result.success:
+            return None
+        document_text = result.markdown
+        
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1, openai_api_key=os.getenv("OPENAI_API_KEY"))
+    structured_llm = llm.with_structured_output(DeepSTPDetailsSchema)
+    
+    try:
+        prompt = (
+            "Read this specific environmental consent order approval text carefully. "
+            "Extract deep metrics regarding client identifiers and wastewater engineering configurations:\n\n" + document_text[:15000]
+        )
+        return structured_llm.invoke(prompt)
+    except Exception as e:
+        print(f"[Error Stage 2] Document synthesis issue: {e}")
         return None
 
 async def main():
-    # 🟢 TARGET APPLIED: Connecting directly to your designated portal node URL
-    target_urls = [
-        "https://xgn.karnataka.gov.in/CSHARP/ALLConsentOrder.aspx"
-    ]
-    
-    all_leads = []
-    for url in target_urls:
-        leads_list = await extract_stp_leads_from_url(url)
-        if leads_list:
-            all_leads.extend(leads_list)
-            
+    dashboard_url = "https://xgn.karnataka.gov.in/CSHARP/ALLConsentOrder.aspx"
     output_file = "karnataka_stp_leads.csv"
     
-    if all_leads:
-        df = pd.DataFrame(all_leads)
+    # Stage 1: Get top rows and their document links
+    consent_rows = await get_consent_rows_from_dashboard(dashboard_url)
+    
+    all_deep_leads = []
+    
+    # Stage 2: Deep crawl the top 3 documents to avoid rate limits/timeouts
+    for row in consent_rows[:3]:
+        # Skip if the link didn't extract cleanly
+        if not row.document_url or "http" not in row.document_url:
+            continue
+            
+        deep_data = await extract_deep_stp_data(row.document_url)
+        
+        if deep_data:
+            all_deep_leads.append({
+                "Consent Number": row.consent_number,
+                "Client Name": deep_data.client_name,
+                "STP Required": deep_data.stp_required,
+                "STP Capacity": deep_data.stp_capacity,
+                "Discharge Standards": deep_data.discharge_standards,
+                "Contact Info": deep_data.contact_details,
+                "Document Link": row.document_url
+            })
+            
+    if all_deep_leads:
+        df = pd.DataFrame(all_deep_leads)
         if os.path.exists(output_file):
             df.to_csv(output_file, mode='a', header=False, index=False)
         else:
             df.to_csv(output_file, index=False)
-        print(f"[Success] Data pipeline run finalized. Syncing rows to {output_file}.")
+        print(f"[Success] Data pipeline run finalized. Deep data saved to {output_file}.")
     else:
         if not os.path.exists(output_file):
-            df_empty = pd.DataFrame(columns=["Company/Project Name", "Consent Type", "Regional Office", "Grant Date", "Validity Date", "Source Portal"])
+            df_empty = pd.DataFrame(columns=["Consent Number", "Client Name", "STP Required", "STP Capacity", "Discharge Standards", "Contact Info", "Document Link"])
             df_empty.to_csv(output_file, index=False)
-        print(f"[Agent] Table parsed successfully. Checked workspace registry at {output_file}.")
+        print("[Agent] Deep crawl iteration finished without harvesting new data blocks.")
 
 if __name__ == "__main__":
     asyncio.run(main())
